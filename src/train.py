@@ -1,19 +1,4 @@
-
-"""Entraîne un modèle de scoring et trace le run dans MLflow (expérience « scoring »).
-
-Hyper-paramètres par défaut : params.yaml (section train) ; les options de la ligne de
-commande les surchargent (utilisé par src/grid_search.py). Le modèle enregistré est un
-Pipeline scikit-learn complet (prétraitement décrit par dataset.yaml + estimateur) : il
-prend en entrée les colonnes brutes, exactement comme l'API de prédiction des labs 4-5.
-
-Les métriques de décision (F1, précision, rappel, coût métier) sont calculées au seuil
-qui minimise le coût métier (cfg.cost_threshold), pas à 0,5 : ce seuil est loggé
-en paramètre `decision_threshold` et rangé dans les métadonnées du modèle.
-
-Sorties : un run MLflow (params, métriques, tags, modèle) et une copie locale du modèle
-au format MLflow dans models/model/ (sortie DVC, relue par src/evaluate.py).
-"""
-
+"""Entraîne un modèle de scoring et trace le run dans MLflow (expérience « scoring »)."""
 import argparse
 import hashlib
 import os
@@ -46,7 +31,6 @@ TRAIN_CSV = Path("data/processed/train.csv")
 TEST_CSV = Path("data/processed/test.csv")
 MODEL_DIR = Path("models/model")
 
-# Type de modèle -> (classe scikit-learn, hyper-paramètres pris dans params.yaml / la CLI)
 MODELS = {
     "logistic_regression": (LogisticRegression, ["C", "class_weight"]),
     "random_forest": (RandomForestClassifier, ["n_estimators", "max_depth", "class_weight"]),
@@ -54,15 +38,10 @@ MODELS = {
         GradientBoostingClassifier,
         ["n_estimators", "max_depth", "learning_rate"],
     ),
-    "dummy": (DummyClassifier, []),  # référence naïve : probabilité = taux de la classe
+    "dummy": (DummyClassifier, []),
 }
 
-# MLflow 3 sérialise en skops (pas en pickle) : seuls les types déclarés « de confiance »
-# peuvent être rechargés. Ceux-ci sont utilisés par OneHotEncoder et par les arbres.
 SKOPS_TRUSTED_TYPES = ["numpy.dtype", "sklearn.tree._tree.Tree"]
-
-# Dépendances nécessaires pour recharger le modèle (images de serving des labs 4-5).
-# Sans cette liste, MLflow 3 recopie tout uv.lock (près de 300 paquets du cours).
 PIP_REQUIREMENTS = [f"{p}=={version(p)}" for p in ("scikit-learn", "skops", "pandas", "numpy")]
 
 
@@ -81,8 +60,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_depth", type=none_or(int), default=defaults["max_depth"])
     parser.add_argument("--learning_rate", type=float, default=defaults["learning_rate"])
     parser.add_argument("--random_state", type=int, default=defaults["random_state"])
-    # NB : argparse applique aussi `type` aux valeurs par défaut écrites en texte
-    # (« none » dans params.yaml devient None).
     return parser.parse_args()
 
 
@@ -98,11 +75,7 @@ def build_model(cfg: DatasetConfig, model_type: str, hyperparams: dict, seed: in
 
 
 def decision_threshold(cfg: DatasetConfig, class_weight, y_train: pd.Series) -> float:
-    """Seuil qui minimise le coût métier de dataset.yaml (et non 0,5).
-
-    class_weight="balanced" donne aux positifs un poids n_neg/n_pos fois plus grand :
-    les probabilités du modèle sont gonflées d'autant, le seuil remonte en conséquence.
-    """
+    """Seuil qui minimise le coût métier de dataset.yaml (et non 0,5)."""
     k = (y_train == 0).sum() / (y_train == 1).sum() if class_weight == "balanced" else 1.0
     return cfg.cost_threshold(float(k))
 
@@ -130,7 +103,6 @@ def main() -> None:
     args = parse_args()
     cfg = load_config()
 
-    # Numériques en float64 : la signature MLflow les déclare `double` (cfg.read_xy)
     X_train, y_train = cfg.read_xy(TRAIN_CSV)
     X_test, y_test = cfg.read_xy(TEST_CSV)
 
@@ -138,11 +110,8 @@ def main() -> None:
     threshold = decision_threshold(cfg, hyperparams.get("class_weight"), y_train)
     run_name = "-".join([args.model, *(f"{k}={v}" for k, v in hyperparams.items())])
 
-    # Qui a lancé le run ? DVC définit DVC_STAGE ; grid_search.py définit LAUNCHED_BY.
     launched_by = "dvc" if os.getenv("DVC_STAGE") else os.getenv("LAUNCHED_BY", "manual")
 
-    # Serveur MLflow du cours (MLFLOW_TRACKING_URI dans .env) : aucun identifiant S3 ici,
-    # le serveur fait proxy des artefacts vers s3://mlflow-artifacts.
     mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000"))
     mlflow.set_experiment(EXPERIMENT)
 
@@ -164,7 +133,6 @@ def main() -> None:
         metrics = compute_metrics(cfg, y_test, model.predict_proba(X_test)[:, 1], threshold)
         mlflow.log_metrics(metrics)
 
-        # Signature = contrat d'entrée/sortie du modèle, vérifié au chargement / au serving
         signature = infer_signature(X_test, model.predict(X_test))
         mlflow.sklearn.log_model(
             sk_model=model,
@@ -173,10 +141,9 @@ def main() -> None:
             input_example=X_test.head(3),
             pip_requirements=PIP_REQUIREMENTS,
             skops_trusted_types=SKOPS_TRUSTED_TYPES,
-            metadata={"decision_threshold": threshold},  # le seuil voyage avec le modèle
+            metadata={"decision_threshold": threshold},
         )
 
-        # Copie locale (sortie du stage DVC train, relue par src/evaluate.py)
         shutil.rmtree(MODEL_DIR, ignore_errors=True)
         mlflow.sklearn.save_model(
             model,
@@ -195,4 +162,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
